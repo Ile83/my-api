@@ -1935,3 +1935,59 @@ Doing the overlap check inside the store lock is the right call for concurrency.
 One question you should verify against the assignment spec
 
 Your GET returns an object { items, total, limit, offset }. Many simple assignments expect a raw array Booking[]. If the assignment statement says “return bookings” without mentioning pagination metadata, you might need to return only page (or provide both behind a query flag). If you paste the exact API requirements, I can align the response shape to them precisely without guesswork.
+
+## server.ts tiedoston Github-Copilot komento /Explain
+
+This is your application's entry point—the file that actually starts the HTTP server. It demonstrates the separation of concerns between app configuration (handled in createApp()) and server lifecycle management (handled here).
+
+The port configuration uses environment variable parsing with a sensible fallback. It checks for process.env.PORT (which deployment platforms like Heroku, Railway, or Azure automatically set), converts it to a number, or defaults to 3000 for local development. The ternary with Number() is important because environment variables are always strings—without the conversion, you'd pass the string "3000" to listen(), which would work but is semantically incorrect.
+
+Potential gotcha: Number(process.env.PORT) returns NaN if the environment variable contains non-numeric text. A more defensive approach would be:
+
+The app.listen() call binds the Express app to the specified port and starts accepting connections. The callback function executes once the server is successfully bound, making it safe to log the startup message. This is when your API becomes reachable—before this line, your routes and middleware are configured but not yet accepting traffic.
+
+The console.log is simple but effective for local development. In production, you'd typically use your structured logger (pino) instead: logger.info({ port: PORT }, 'Server started'). This would integrate with your logging infrastructure and include context like timestamps, host information, and other metadata.
+
+Missing graceful shutdown: This code starts the server but doesn't handle shutdown signals (SIGTERM, SIGINT). If you deploy to a container orchestration platform, it will send SIGTERM when scaling down or redeploying. Without a shutdown handler, in-flight requests would be abruptly terminated. A production-ready version should look like:
+
+This is a clean, minimal entry point that follows the single-responsibility principle—it's only concerned with starting the server, while createApp() handles all the configuration complexity.
+
+## Prompti Github Co-pilot Claude Sonnetille: is this production level code?
+
+No, this is not production-ready. It's a bare-bones development setup with critical operational issues:
+
+Critical Issues:
+
+No graceful shutdown - When Kubernetes, Docker, or your cloud platform sends SIGTERM to restart/redeploy the app, this code ignores it. In-flight requests are immediately killed, causing errors for users. Production deployments require graceful shutdown handlers.
+
+No error handling on listen() - If the port is already in use or requires elevated permissions, the app crashes with an uncaught exception. No cleanup, no useful error message.
+
+Weak port validation - Number(process.env.PORT) returns NaN for invalid values like "abc" or empty strings. This causes listen() to fail with a cryptic error. Should validate and fail fast with a clear message.
+
+No uncaught exception handlers - Missing process.on('uncaughtException') and process.on('unhandledRejection'). If any unhandled error occurs, the process crashes without logging or cleanup.
+
+Console.log for production - Should use structured logging (pino/winston) to integrate with log aggregation systems.
+
+No server reference saved - You call app.listen() but don't save the returned Server object, making graceful shutdown impossible even if you add signal handlers later.
+
+No startup validation - Doesn't verify critical dependencies (database connections, required env vars) before accepting traffic. The health endpoint will return 200 even if the app is broken.
+
+Required for production: Add graceful shutdown (SIGTERM/SIGINT handlers with connection draining), validate PORT properly with clear error messages, add uncaught error handlers, use structured logging, save the server reference for controlled shutdown, add startup health checks before accepting traffic, and implement a shutdown timeout to force-kill after a grace period.
+
+This needs significant hardening before production deployment.
+
+## VS-code /fix
+
+@workspace /explain Namespace '"node:http"' has no exported member 'Socket'.
+
+Workspace
+The error occurs because you're trying to import Socket from node:http, but it's actually exported from node:net. Here's the fix:
+
+The Socket type comes from the net module because HTTP servers use TCP sockets under the hood. The server.on("connection", ...) event provides a net.Socket instance, not an HTTP-specific socket type.
+
+Why this matters: The connection event fires for every TCP connection established to your server, before HTTP protocol handling begins. By tracking these sockets in a Set, you can forcefully terminate long-lived keep-alive connections during graceful shutdown, preventing the server from hanging indefinitely waiting for idle connections to close naturally.
+
+This is a robust production pattern—most container orchestration platforms give you a grace period (typically 30 seconds) to finish in-flight requests before forcefully killing the process. Your code respects that window while ensuring the process doesn't hang forever on misbehaving clients.
+
+
+

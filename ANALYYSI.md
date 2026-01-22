@@ -174,4 +174,34 @@ Tavoitteena oli tehdä API:n käytöksestä ennustettavaa sekä asiakkaalle ett�
 
 Näiden muutosten ansiosta koodi on robustimpi, helpommin arvioitava ja lähempänä todellisen tuotantojärjestelmän vaatimuksia, kuitenkaan ylittämättä kurssitehtävän laajuutta.
 
+## server.ts
+
+## 1. Mitä tekoäly teki hyvin alkuperäisessä app.ts tiedostossa?
+
+Rakensi selkeän ja yksinkertaisen perusrungon Express-sovellukselle: sovelluksen luonti, reititys ja perusasetukset olivat helposti ymmärrettäviä.
+
+Erotteli sovelluksen luontilogikan (esim. createApp) palvelimen käynnistämisestä, mikä on hyvä käytäntö testattavuuden ja ylläpidettävyyden kannalta.
+
+Kokonaisuus oli “minimaalinen ja toimiva” kehitysvaiheen tarpeisiin: siitä näki nopeasti, miten palvelu käynnistyy ja missä reitit ovat.
+
+## 2. Mitä tekoäly teki huonosti?
+
+Tuotantovalmiuden näkökulmasta puutteita jäi (tai niitä ei huomioitu lainkaan), kuten selkeä readiness/liveness-ajattelu: jos app.ts palauttaa aina 200 “health”-tyyppisesti ilman riippuvuustarkistuksia, se antaa väärän kuvan palvelun kunnosta.
+
+Mahdollinen virheidenkäsittely oli usein liian kevyt: esimerkiksi virheiden yhdenmukainen muoto (JSON error response), lokitus ja poikkeusten “fail fast” -periaate saattoivat jäädä vajaiksi.
+
+Ympäristöriippuvuuksien (esim. pakolliset env-muuttujat tai ulkoiset palvelut) validointi puuttui tai oli epäselvää: app saattoi käynnistyä “näennäisesti” vaikka jokin kriittinen riippuvuus olisi rikki.
+
+## 3. Mitkä olivat tärkeimmät parannukset, jotka teit tekoälyn tuottamaan koodiin ja miksi?
+
+Graceful shutdown ja hallittu alasajo (SIGTERM/SIGINT + yhteyksien tyhjennys): tärkein tuotantoparannus, koska kontti-/pilviympäristöissä prosesseja pysäytetään ja käynnistetään uudelleen jatkuvasti. Ilman tätä käyttäjien pyynnöt katkeavat ja virhepiikit kasvavat.
+
+Portin validointi ja selkeä virheilmoitus: estää tilanteen, jossa PORT on virheellinen (NaN/tyhjä/merkkijono) ja sovellus kaatuu epäselvällä virheellä. Parempi “fail fast” ja helpompi debuggaus.
+
+Server-viitteen talteenotto ja listen()-virheiden käsittely: ilman server-objektia et voi sulkea palvelinta hallitusti. Lisäksi EADDRINUSE/EACCES-tyyppiset virheet pitää kirjata selkeästi ja lopettaa prosessi hallitusti.
+
+unhandledRejection ja uncaughtException -käsittely: tuotannossa on parempi kirjata virhe kunnolla ja ajaa hallittu alasajo, koska prosessin tila voi olla epäluotettava.
+
+Strukturoitu JSON-lokitus: tekee lokeista koneellisesti parsittavia ja yhteensopivia lokikeräysjärjestelmien kanssa (esim. Kubernetes/Cloud logging). Tämä nopeuttaa vianetsintää ja operointia.
+
 
