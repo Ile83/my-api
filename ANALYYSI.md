@@ -92,3 +92,37 @@ Toinen keskeinen parannus oli nykyhetken (`now`) injektoiminen skeemaan funktion
 Lisäksi skeemaan lisättiin liiketoimintasäännöt varauksen minimikestolle, maksimikestolle ja enimmäisvarausajalle tulevaisuuteen. Nämä rajoitteet tekevät rajapinnasta realistisemman ja tuotantokäyttöön soveltuvan.  
 
 Kokonaisuutena muutokset paransivat koodin testattavuutta, suorituskykyä, ylläpidettävyyttä ja liiketoimintalogiikan selkeyttä ilman, että rajapinnan ulkoinen toiminta monimutkaistui.
+
+## memoryStore.ts
+
+## 1. Mitä tekoäly teki hyvin?
+
+Tekoäly tuotti toimivan ja selkeästi jäsennellyn in-memory-toteutuksen, joka vastasi annetun tehtävän vaatimuksia. Koodi oli luettavaa, TypeScript-tyypitykset olivat pääosin oikein, ja kokonaisrakenne (store, mutex, domain-tyypit) oli jaettu loogisiin osiin.
+Lisäksi tekoäly tunnisti tarpeen suojata samanaikaiset kirjoitusoperaatiot ja yritti ratkaista ongelman huonelähtöisellä (per roomId) mutex-lukituksella, mikä on oikea lähestymistapa kilpailutilanteiden estämiseen.
+Myös päällekkäisten varausten tarkistus oli eriytetty predicate-funktion kautta, mikä teki ratkaisusta joustavan ja helposti testattavan.
+
+## . Mitä tekoäly teki huonosti?
+
+Merkittävin ongelma oli KeyedMutexin virheellinen siivouslogiikka, joka aiheutti muistivuodon. Promise-ketjujen vertailu tehtiin virheellisesti, jolloin lukot jäivät Map-rakenteeseen pysyvästi. Tämä on vakava virhe, joka tekisi ratkaisusta pitkässä ajossa epäluotettavan.
+
+Lisäksi tekoäly altisti julkisessa API:ssa sekä atomisia että ei-atomisia kirjoitusmetodeja (insert, remove vs. insertIfNoOverlap, removeIfExists). Tämä on suunnittelullinen heikkous, koska se mahdollistaa lukituksen ohittamisen vahingossa ja rikkoo säieturvallisuuden.
+
+Koodi käytti myös lineaarisia hakuja (Array.find, Array.splice) kaikkiin operaatioihin, mikä ei skaalaudu hyvin, jos varauksia kertyy paljon. Myös huoneita luotiin tarpeettomasti lukuoperaatioissa, mikä lisäsi turhaa muistinkäyttöä.
+
+## 3. Mitkä olivat tärkeimmät parannukset, jotka teit tekoälyn tuottamaan koodiin ja miksi?
+
+Tein seuraavat keskeiset parannukset:
+
+Korjasin mutexin muistivuodon tallentamalla ja vertaamalla oikeaa Promise-instanssia, jolloin lukot siivotaan varmasti, kun niitä ei enää tarvita. Tämä on kriittinen korjaus pitkäikäiselle palvelimelle.
+
+Poistin ei-atomiset kirjoitusmetodit julkisesta API:sta, jotta kaikki tilaa muuttavat operaatiot kulkevat aina mutexin kautta. Tämä estää vahingossa syntyvät kilpailutilanteet.
+
+Korvasin taulukkopohjaisen tallennuksen Map-rakenteella (bookingId → Booking), mikä mahdollistaa O(1)-aikaiset haut ja poistot ja parantaa suorituskykyä.
+
+Estin turhan huoneiden luonnin lukuoperaatioissa, jotta muistia ei kulu tarpeettomasti.
+
+Lisäsin kapasiteettirajoja (huoneet, varaukset), jotta ratkaisu on turvallisempi myös väärinkäyttö- tai kuormitustilanteissa.
+
+Näiden muutosten ansiosta ratkaisu on selvästi luotettavampi, helpommin ylläpidettävä ja paremmin perusteltavissa myös tuotantitason suunnittelun näkökulmasta, vaikka itse toteutus onkin edelleen in-memory-ratkaisu.
+
+
