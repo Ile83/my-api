@@ -1989,5 +1989,389 @@ Why this matters: The connection event fires for every TCP connection establishe
 
 This is a robust production pattern—most container orchestration platforms give you a grace period (typically 30 seconds) to finish in-flight requests before forcefully killing the process. Your code respects that window while ensuring the process doesn't hang forever on misbehaving clients.
 
+## app.ts ja server.ts refaktorointi
+
+## Minun prompti ChatGpt:lle: I updated the project files and now I want to do this next: Optional next hardening step (small, but meaningful) Right now your /health always returns 200 OK. In real deployments you typically want: /live (liveness): process is up (always 200 unless truly wedged) /ready (readiness): only 200 when dependencies are OK; return 503 during startup and shutdown If you want, I can provide a minimal, clean update to app.ts to add GET /live + GET /ready with a readiness flag that server.ts can flip during shutdown—still without introducing extra dependencies.
+
+## ChatGpt vastaus:
+
+Below is a minimal, clean hardening update that adds GET /live and GET /ready, and implements a readiness flag that server.ts flips on startup and during shutdown. No new dependencies.
+
+Full replacement: app.ts
+import express, { Request, Response, NextFunction } from "express";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
+import pinoHttp from "pino-http";
+import { randomUUID } from "crypto";
+import { bookingsRouter } from "./routes/bookings";
+
+/**
+ * If you are on Express 4 and you use async handlers in routers, wrap them with this.
+ * Express 5 largely removes the need for it, but it is harmless to keep.
+ */
+export function asyncHandler<
+  Req extends Request = Request,
+  Res extends Response = Response
+>(fn: (req: Req, res: Res, next: NextFunction) => Promise<unknown>) {
+  return (req: Req, res: Res, next: NextFunction) => {
+    Promise.resolve(fn(req, res, next)).catch(next);
+  };
+}
+
+type ReadyState = {
+  ready: boolean;
+  reason?: string;
+  since?: string; // ISO
+};
+
+export function createApp() {
+  const app = express();
+
+  // Readiness flag: default to NOT ready until server.ts flips it true.
+  app.locals.readyState = {
+    ready: false,
+    reason: "starting",
+    since: new Date().toISOString(),
+  } satisfies ReadyState;
+
+  // Trust proxy if you’re behind a reverse proxy (common in production).
+  // If you run directly on the internet without a proxy, keep it false.
+  app.set("trust proxy", 1);
+
+  // Correlation / request ID
+  app.use((req, _res, next) => {
+    const existing = req.header("x-request-id");
+    (req as any).id = existing ?? randomUUID();
+    next();
+  });
+
+  // Structured request logging
+  app.use(
+    pinoHttp({
+      redact: ["req.headers.authorization"],
+      customProps: (req) => ({ requestId: (req as any).id }),
+    })
+  );
+
+  // Security headers baseline
+  app.use(
+    helmet({
+      // For JSON APIs, you typically don’t need CSP unless you serve HTML.
+      contentSecurityPolicy: false,
+    })
+  );
+
+  // Limit JSON payload size
+  app.use(express.json({ limit: "100kb" }));
+
+  // Basic rate limiting (tune per environment)
+  app.use(
+    rateLimit({
+      windowMs: 60_000,
+      limit: 120, // 120 req/min per IP
+      standardHeaders: true,
+      legacyHeaders: false,
+    })
+  );
+
+  /**
+   * Liveness: process is up.
+   * Should return 200 unless the process is truly wedged.
+   */
+  app.get("/live", (_req: Request, res: Response) => {
+    res.status(200).json({ status: "live" });
+  });
+
+  /**
+   * Readiness: return 200 only when dependencies are OK AND app is ready to serve traffic.
+   * Return 503 during startup and shutdown.
+   */
+  app.get("/ready", (_req: Request, res: Response) => {
+    const state = (app.locals.readyState ?? { ready: false }) as ReadyState;
+
+    if (!state.ready) {
+      res.status(503).json({
+        status: "not_ready",
+        reason: state.reason ?? "unknown",
+        since: state.since,
+      });
+      return;
+    }
+
+    res.status(200).json({ status: "ready", since: state.since });
+  });
+
+  /**
+   * Backwards-compatible health endpoint:
+   * treat it as readiness (common expectation in orchestrated environments).
+   */
+  app.get("/health", (req: Request, res: Response) => {
+    // Delegate to readiness behavior to avoid "always 200" in prod.
+    // (Keeps /health for existing checks/curl commands.)
+    const state = (app.locals.readyState ?? { ready: false }) as ReadyState;
+
+    if (!state.ready) {
+      res.status(503).json({
+        status: "not_ready",
+        reason: state.reason ?? "unknown",
+        since: state.since,
+      });
+      return;
+    }
+
+    res.status(200).json({ status: "ok", since: state.since });
+  });
+
+  // Routes
+  app.use(bookingsRouter);
+
+  // 404
+  app.use((_req: Request, res: Response) => {
+    res.status(404).json({ error: "not_found", message: "Route not found." });
+  });
+
+  // Error handler
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
+    // Always log server-side with requestId for correlation
+    (req as any).log?.error({ err }, "Unhandled error");
+
+    // Avoid leaking internals by default
+    res.status(500).json({
+      error: "internal_error",
+      message: "Unexpected server error.",
+      requestId: (req as any).id,
+    });
+  });
+
+  return app;
+}
+
+Minimal changes: server.ts
+
+Only two meaningful additions:
+
+Flip readiness true once the server is listening
+
+Flip readiness false immediately at shutdown start
+
+// ... keep your existing imports and code ...
+
+const app = createApp();
+
+// OPTIONAL: helper to set readiness consistently
+function setReady(ready: boolean, reason?: string) {
+  app.locals.readyState = {
+    ready,
+    reason,
+    since: new Date().toISOString(),
+  };
+}
+
+async function start() {
+  // Startup checks before accepting traffic:
+  // await connectToDatabase();
+
+  server = http.createServer(app);
+
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+  });
+
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    log.error("server_error", { code: err.code, message: err.message });
+    setReady(false, `server_error:${err.code ?? "unknown"}`);
+    process.exitCode = 1;
+  });
+
+  server.listen(PORT, () => {
+    // Mark ready only after we are actually listening
+    setReady(true);
+    log.info("server_listening", { url: `http://localhost:${PORT}`, port: PORT });
+  });
+}
+
+function beginShutdown(reason: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
+  // Stop being "ready" immediately so orchestrator stops routing traffic here
+  setReady(false, `shutting_down:${reason}`);
+
+  log.warn("shutdown_started", { reason, graceMs: SHUTDOWN_GRACE_MS });
+
+  // ... keep the rest of your existing shutdown logic ...
+}
+
+Quick manual test
+# In one terminal
+npm run dev
+
+# In another:
+curl -i http://localhost:3000/live
+curl -i http://localhost:3000/ready
+curl -i http://localhost:3000/health
+
+
+Then stop the server (Ctrl+C). During shutdown you should observe /ready and /health returning 503 as soon as shutdown begins (assuming the process is still up long enough for a request).
+
+If you want, I can also show a clean pattern for “startup dependency checks” (e.g., verify env vars, or ping DB) that sets ready=false with a precise reason until checks succeed.
+
+can you give full replacement of server.ts
+import http from "node:http";
+import type { Socket } from "node:net";
+import { createApp } from "./app";
+
+/**
+ * Minimal structured logger without extra dependencies.
+ * Replace with pino/winston in real production if desired.
+ */
+const log = {
+  info: (msg: string, meta: Record<string, unknown> = {}) =>
+    console.log(JSON.stringify({ level: "info", msg, time: new Date().toISOString(), ...meta })),
+  warn: (msg: string, meta: Record<string, unknown> = {}) =>
+    console.warn(JSON.stringify({ level: "warn", msg, time: new Date().toISOString(), ...meta })),
+  error: (msg: string, meta: Record<string, unknown> = {}) =>
+    console.error(JSON.stringify({ level: "error", msg, time: new Date().toISOString(), ...meta })),
+};
+
+function parsePort(envValue: string | undefined, fallback: number): number {
+  if (envValue == null || envValue.trim() === "") return fallback;
+
+  if (!/^\d+$/.test(envValue.trim())) {
+    throw new Error(`Invalid PORT value "${envValue}". Must be an integer between 1 and 65535.`);
+  }
+
+  const port = Number(envValue);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`Invalid PORT value "${envValue}". Must be an integer between 1 and 65535.`);
+  }
+
+  return port;
+}
+
+const PORT = parsePort(process.env.PORT, 3000);
+
+const SHUTDOWN_GRACE_MS = Number.isFinite(Number(process.env.SHUTDOWN_GRACE_MS))
+  ? Number(process.env.SHUTDOWN_GRACE_MS)
+  : 10_000;
+
+const app = createApp();
+
+type ReadyState = {
+  ready: boolean;
+  reason?: string;
+  since: string; // ISO
+};
+
+function setReady(ready: boolean, reason?: string) {
+  const state: ReadyState = {
+    ready,
+    reason,
+    since: new Date().toISOString(),
+  };
+  app.locals.readyState = state;
+}
+
+let server: http.Server | undefined;
+const sockets = new Set<Socket>();
+let shuttingDown = false;
+
+async function start() {
+  // Ensure not-ready until we are actually listening and dependencies (if any) are OK.
+  setReady(false, "starting");
+
+  // If you later add critical dependencies, validate/connect here BEFORE listen().
+  // Example:
+  // await connectToDatabase();
+  // setReady(false, "db_connecting");
+  // await db.ping();
+
+  server = http.createServer(app);
+
+  // Track sockets so we can force-close keep-alive connections after grace period.
+  server.on("connection", (socket: Socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+  });
+
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    // EADDRINUSE, EACCES, etc.
+    log.error("server_error", { code: err.code, message: err.message });
+    setReady(false, `server_error:${err.code ?? "unknown"}`);
+    process.exitCode = 1;
+  });
+
+  server.listen(PORT, () => {
+    // Mark ready only after binding succeeded and we are accepting connections.
+    setReady(true);
+    log.info("server_listening", { url: `http://localhost:${PORT}`, port: PORT });
+  });
+}
+
+function beginShutdown(reason: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
+  // Immediately become not-ready so Kubernetes / LB stops routing traffic here.
+  setReady(false, `shutting_down:${reason}`);
+
+  log.warn("shutdown_started", { reason, graceMs: SHUTDOWN_GRACE_MS });
+
+  if (!server) {
+    log.error("shutdown_no_server_reference");
+    process.exit(1);
+    return;
+  }
+
+  // Stop accepting new connections; allow in-flight requests to finish.
+  const forceTimer = setTimeout(() => {
+    log.error("shutdown_force_exit", { openSockets: sockets.size });
+    for (const s of sockets) s.destroy();
+    process.exit(1);
+  }, SHUTDOWN_GRACE_MS);
+
+  // Allow process to exit naturally if this is the only thing left.
+  forceTimer.unref();
+
+  server.close((err?: Error) => {
+    if (err) {
+      log.error("shutdown_server_close_error", { message: err.message });
+      process.exit(1);
+      return;
+    }
+
+    log.info("shutdown_complete");
+    process.exit(0);
+  });
+}
+
+process.on("SIGTERM", () => beginShutdown("SIGTERM"));
+process.on("SIGINT", () => beginShutdown("SIGINT"));
+
+process.on("unhandledRejection", (reason) => {
+  log.error("unhandled_rejection", {
+    reason: reason instanceof Error ? reason.message : String(reason),
+  });
+  // Safer default: terminate gracefully (process may be in unknown state).
+  beginShutdown("unhandledRejection");
+});
+
+process.on("uncaughtException", (err) => {
+  log.error("uncaught_exception", { message: err.message, stack: err.stack });
+  // Uncaught exceptions mean state is undefined; terminate gracefully.
+  beginShutdown("uncaughtException");
+});
+
+start().catch((err: unknown) => {
+  const e = err instanceof Error ? err : new Error(String(err));
+  log.error("startup_failed", { message: e.message, stack: e.stack });
+  setReady(false, "startup_failed");
+  process.exit(1);
+});
+
+
+
 
 

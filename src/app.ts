@@ -18,8 +18,21 @@ export function asyncHandler<
   };
 }
 
+type ReadyState = {
+  ready: boolean;
+  reason?: string;
+  since?: string; // ISO
+};
+
 export function createApp() {
   const app = express();
+
+  // Readiness flag: default to NOT ready until server.ts flips it true.
+  app.locals.readyState = {
+    ready: false,
+    reason: "starting",
+    since: new Date().toISOString(),
+  } satisfies ReadyState;
 
   // Trust proxy if you’re behind a reverse proxy (common in production).
   // If you run directly on the internet without a proxy, keep it false.
@@ -61,9 +74,52 @@ export function createApp() {
     })
   );
 
-  // Health endpoint
-  app.get("/health", (_req: Request, res: Response) => {
-    res.status(200).json({ status: "ok" });
+  /**
+   * Liveness: process is up.
+   * Should return 200 unless the process is truly wedged.
+   */
+  app.get("/live", (_req: Request, res: Response) => {
+    res.status(200).json({ status: "live" });
+  });
+
+  /**
+   * Readiness: return 200 only when dependencies are OK AND app is ready to serve traffic.
+   * Return 503 during startup and shutdown.
+   */
+  app.get("/ready", (_req: Request, res: Response) => {
+    const state = (app.locals.readyState ?? { ready: false }) as ReadyState;
+
+    if (!state.ready) {
+      res.status(503).json({
+        status: "not_ready",
+        reason: state.reason ?? "unknown",
+        since: state.since,
+      });
+      return;
+    }
+
+    res.status(200).json({ status: "ready", since: state.since });
+  });
+
+  /**
+   * Backwards-compatible health endpoint:
+   * treat it as readiness (common expectation in orchestrated environments).
+   */
+  app.get("/health", (req: Request, res: Response) => {
+    // Delegate to readiness behavior to avoid "always 200" in prod.
+    // (Keeps /health for existing checks/curl commands.)
+    const state = (app.locals.readyState ?? { ready: false }) as ReadyState;
+
+    if (!state.ready) {
+      res.status(503).json({
+        status: "not_ready",
+        reason: state.reason ?? "unknown",
+        since: state.since,
+      });
+      return;
+    }
+
+    res.status(200).json({ status: "ok", since: state.since });
   });
 
   // Routes

@@ -2,23 +2,46 @@
 
 ## Overview
 
-This project implements a simple REST API for managing meeting room bookings. The goal is to demonstrate clean API design, request validation, domain-level time logic, and safe handling of concurrent requests using an in-memory data store.
+This repository contains a TypeScript-based REST API for managing meeting room bookings. The project demonstrates how to design a small but robust backend service with clear domain logic, strong validation, and safe handling of concurrent requests.
 
-The implementation is intentionally lightweight and focuses on correctness, clarity, and reviewability rather than production infrastructure.
+The API was developed using an **AI-first → human-refactor → analysis** workflow. An initial AI-generated baseline was incrementally improved to address correctness, concurrency, validation, and maintainability concerns. The final result intentionally remains simple, readable, and review-friendly.
 
 ---
 
 ## Tech Stack
 
-* **Node.js**
-* **TypeScript**
+* **Node.js** (runtime)
+* **TypeScript** (static typing and maintainability)
 * **Express** (HTTP server and routing)
-* **Zod** (request validation)
-* **UUID** (booking identifiers)
+* **Zod** (request validation and business rule enforcement)
+* **UUID** (unique booking identifiers)
 
-**Storage:**
+**Storage**
 
-* In-memory data store (Map-based, scoped per room)
+* In-memory store (Map-based)
+* Per-room locking to prevent concurrent double bookings
+
+---
+
+## Project Structure
+
+```
+src/
+  app.ts            # Express app configuration and middleware
+  server.ts         # Server startup and lifecycle handling
+  routes/
+    bookings.ts     # REST endpoints for bookings
+  domain/
+    booking.ts      # Domain types and interval overlap logic
+  validation/
+    schemas.ts      # Zod schemas and business validation rules
+  store/
+    memoryStore.ts  # In-memory store with per-room mutex
+
+ANALYYSI.md         # Analysis of AI-generated code and refactoring decisions
+PROMPTIT.md         # Prompts and AI responses used during development
+README.md
+```
 
 ---
 
@@ -39,7 +62,7 @@ npm install
 
 ## Running the Application
 
-### Development mode (auto-reload)
+### Development mode
 
 ```bash
 npm run dev
@@ -52,7 +75,7 @@ npm run build
 npm start
 ```
 
-The server starts on `http://localhost:3000` by default (or the port defined in `PORT`).
+By default, the server runs on `http://localhost:3000` (or the port defined in the `PORT` environment variable).
 
 ---
 
@@ -64,9 +87,23 @@ The server starts on `http://localhost:3000` by default (or the port defined in 
 GET /rooms/:roomId/bookings
 ```
 
+Optional query parameters:
+
+* `limit` (integer, default 100)
+* `offset` (integer, default 0)
+
 **Response**
 
-* `200 OK` – list of bookings
+* `200 OK` – paginated list of bookings
+
+```json
+{
+  "items": [ /* Booking[] */ ],
+  "total": 3,
+  "limit": 100,
+  "offset": 0
+}
+```
 
 **Example**
 
@@ -116,7 +153,7 @@ DELETE /rooms/:roomId/bookings/:bookingId
 **Responses**
 
 * `204 No Content` – booking deleted
-* `404 Not Found` – booking does not exist
+* `404 Not Found` – booking not found
 
 **Example**
 
@@ -132,19 +169,22 @@ curl -i -X DELETE "http://localhost:3000/rooms/alpha/bookings/<bookingId>"
 * Server time is used as the source of truth
 * Bookings in the past are rejected
 * `startTime` must be strictly before `endTime`
+* Booking duration and time horizon limits are enforced in validation
 * Overlap detection uses half-open intervals: **[start, end)**
 
-  * A booking ending at 10:00 does **not** overlap with a booking starting at 10:00
-* Bookings are isolated per room (`roomId`)
+  * A booking ending at 10:00 does **not** overlap with one starting at 10:00
+* Bookings are scoped per room (`roomId`)
+* Concurrent booking creation for the same room is serialized using a per-room mutex
 
 ---
 
 ## Error Handling
 
 * Validation errors return `400 Bad Request` with descriptive messages
-* Booking conflicts return `409 Conflict`
+* Overlapping bookings return `409 Conflict`
 * Missing resources return `404 Not Found`
-* Errors are returned as JSON objects with clear error codes
+* Errors are returned as structured JSON responses
+* Async route handlers are wrapped to ensure rejected promises are properly handled
 
 ---
 
@@ -159,12 +199,11 @@ curl -i -X DELETE "http://localhost:3000/rooms/alpha/bookings/<bookingId>"
 
 ## Development Notes
 
-This project follows an **AI-first → human-refactor → analysis** workflow.
+This project was developed as part of a technical assignment emphasizing:
 
-For a detailed discussion of:
+* Correctness over feature count
+* Explicit business rules and assumptions
+* Safe concurrency handling
+* Clear separation between routing, validation, domain logic, and storage
 
-* what the AI-generated code did well
-* what required correction
-* and why specific refactoring decisions were made
-
-see `ANALYYSI.md`.
+A detailed discussion of AI-generated code, identified issues, and refactoring decisions can be found in `ANALYYSI.md`.

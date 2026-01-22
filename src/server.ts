@@ -1,10 +1,10 @@
 import http from "node:http";
-import { Socket } from "node:net";
+import type { Socket } from "node:net";
 import { createApp } from "./app";
 
 /**
- * Basic structured logger without adding dependencies.
- * In production you would typically replace this with pino/winston.
+ * Minimal structured logger without extra dependencies.
+ * Replace with pino/winston in real production if desired.
  */
 const log = {
   info: (msg: string, meta: Record<string, unknown> = {}) =>
@@ -18,7 +18,6 @@ const log = {
 function parsePort(envValue: string | undefined, fallback: number): number {
   if (envValue == null || envValue.trim() === "") return fallback;
 
-  // Only accept base-10 integer ports.
   if (!/^\d+$/.test(envValue.trim())) {
     throw new Error(`Invalid PORT value "${envValue}". Must be an integer between 1 and 65535.`);
   }
@@ -33,38 +32,59 @@ function parsePort(envValue: string | undefined, fallback: number): number {
 
 const PORT = parsePort(process.env.PORT, 3000);
 
-const app = createApp();
-
-// Keep references so we can drain connections on shutdown.
-let server: http.Server | undefined;
-const sockets = new Set<Socket>();
-
 const SHUTDOWN_GRACE_MS = Number.isFinite(Number(process.env.SHUTDOWN_GRACE_MS))
   ? Number(process.env.SHUTDOWN_GRACE_MS)
   : 10_000;
 
+const app = createApp();
+
+type ReadyState = {
+  ready: boolean;
+  reason?: string;
+  since: string; // ISO
+};
+
+function setReady(ready: boolean, reason?: string) {
+  const state: ReadyState = {
+    ready,
+    reason,
+    since: new Date().toISOString(),
+  };
+  app.locals.readyState = state;
+}
+
+let server: http.Server | undefined;
+const sockets = new Set<Socket>();
 let shuttingDown = false;
 
 async function start() {
-  // If you later add DB connections or other critical deps, do it here
-  // *before* listening, and throw on failure to fail fast.
+  // Ensure not-ready until we are actually listening and dependencies (if any) are OK.
+  setReady(false, "starting");
+
+  // If you later add critical dependencies, validate/connect here BEFORE listen().
+  // Example:
   // await connectToDatabase();
+  // setReady(false, "db_connecting");
+  // await db.ping();
 
   server = http.createServer(app);
 
-  // Track sockets so we can destroy long-lived keep-alive connections after grace period.
-  server.on("connection", (socket) => {
+  // Track sockets so we can force-close keep-alive connections after grace period.
+  server.on("connection", (socket: Socket) => {
     sockets.add(socket);
     socket.on("close", () => sockets.delete(socket));
   });
 
   server.on("error", (err: NodeJS.ErrnoException) => {
-    // Listen errors land here (e.g., EADDRINUSE, EACCES) when using server.listen().
+    // EADDRINUSE, EACCES, etc.
     log.error("server_error", { code: err.code, message: err.message });
+    setReady(false, `server_error:${err.code ?? "unknown"}`);
     process.exitCode = 1;
   });
 
   server.listen(PORT, () => {
+    // Mark ready only after binding succeeded and we are accepting connections.
+    setReady(true);
     log.info("server_listening", { url: `http://localhost:${PORT}`, port: PORT });
   });
 }
@@ -73,26 +93,25 @@ function beginShutdown(reason: string) {
   if (shuttingDown) return;
   shuttingDown = true;
 
+  // Immediately become not-ready so Kubernetes / LB stops routing traffic here.
+  setReady(false, `shutting_down:${reason}`);
+
   log.warn("shutdown_started", { reason, graceMs: SHUTDOWN_GRACE_MS });
 
-  // Stop accepting new connections. Existing connections are allowed to finish.
   if (!server) {
-    log.warn("shutdown_no_server_reference");
+    log.error("shutdown_no_server_reference");
     process.exit(1);
     return;
   }
 
-  // Optional: if you implement readiness checks, flip readiness OFF here.
-  // e.g., app.locals.ready = false;
-
+  // Stop accepting new connections; allow in-flight requests to finish.
   const forceTimer = setTimeout(() => {
     log.error("shutdown_force_exit", { openSockets: sockets.size });
-    // Destroy open sockets to avoid hanging indefinitely (keep-alive, stuck clients).
     for (const s of sockets) s.destroy();
     process.exit(1);
   }, SHUTDOWN_GRACE_MS);
 
-  // Allow the process to exit naturally if this is the only thing left.
+  // Allow process to exit naturally if this is the only thing left.
   forceTimer.unref();
 
   server.close((err?: Error) => {
@@ -103,10 +122,6 @@ function beginShutdown(reason: string) {
     }
 
     log.info("shutdown_complete");
-
-    // If you open external resources (DB pools, queues), close them here:
-    // await db.close();
-
     process.exit(0);
   });
 }
@@ -118,18 +133,19 @@ process.on("unhandledRejection", (reason) => {
   log.error("unhandled_rejection", {
     reason: reason instanceof Error ? reason.message : String(reason),
   });
-  // In production, unhandled rejections should generally terminate after logging.
+  // Safer default: terminate gracefully (process may be in unknown state).
   beginShutdown("unhandledRejection");
 });
 
 process.on("uncaughtException", (err) => {
   log.error("uncaught_exception", { message: err.message, stack: err.stack });
-  // Uncaught exceptions mean the process is in an unknown state; terminate gracefully.
+  // Uncaught exceptions mean state is undefined; terminate gracefully.
   beginShutdown("uncaughtException");
 });
 
 start().catch((err: unknown) => {
   const e = err instanceof Error ? err : new Error(String(err));
   log.error("startup_failed", { message: e.message, stack: e.stack });
+  setReady(false, "startup_failed");
   process.exit(1);
 });

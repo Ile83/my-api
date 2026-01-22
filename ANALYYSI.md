@@ -204,4 +204,18 @@ unhandledRejection ja uncaughtException -käsittely: tuotannossa on parempi kirj
 
 Strukturoitu JSON-lokitus: tekee lokeista koneellisesti parsittavia ja yhteensopivia lokikeräysjärjestelmien kanssa (esim. Kubernetes/Cloud logging). Tämä nopeuttaa vianetsintää ja operointia.
 
+## app.ts ja server.ts
+
+## 1. Mitkä olivat tärkeimmät parannukset, jotka teit tekoälyn tuottamaan koodiin ja miksi?
+
+Liveness ja readiness eriytettiin (/live ja /ready): tuotantoympäristöissä (Docker/Kubernetes) halutaan erottaa “prosessi elossa” vs. “valmis ottamaan liikennettä”, jotta kuormantasaaja ei ohjaa pyyntöjä keskeneräiseen tai alasajossa olevaan instanssiin.
+
+Readiness-tila (flag) lisättiin ja sidottiin palvelimen elinkaareen: sovellus ei merkitse itseään valmiiksi ennen kuin kuuntelu on oikeasti käynnissä, mikä vähentää käynnistysvaiheen virheitä ja parantaa luotettavuutta.
+
+Readiness käännetään pois päältä heti shutdownin alussa: kun SIGTERM/SIGINT tulee, instanssi ilmoittaa välittömästi “not ready”, jolloin orchestrator lopettaa liikenteen ohjauksen ja in-flight pyynnöt ehtivät valmistua hallitusti.
+
+/health muutettiin vastaamaan readiness-käyttäytymistä: poistettiin “aina 200” -harha, koska se voi peittää ongelmat ja aiheuttaa sen, että ympäristö pitää rikkinäistä instanssia terveenä.
+
+Aikakatkaistu, hallittu alasajo (grace period + sockettien sulkeminen): estää jumiutumisen keep-alive-yhteyksien tai roikkuvien pyyntöjen vuoksi ja varmistaa, että prosessi poistuu ennustettavasti.
+
 
