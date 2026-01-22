@@ -40,13 +40,3 @@ curl -s -X POST "http://localhost:3000/rooms/alpha/bookings" ^
 Delete a booking: 
 
 curl -i -X DELETE "http://localhost:3000/rooms/alpha/bookings/<bookingId>"
-
-
-Korjattu mutexin muistivuoto ja tehty in-memory store turvallisemmaksi
-
-- Korjattu KeyedMutexin siivouslogiikka, joka aiheutti muistivuodon
-- Poistettu julkisesta API:sta ei-atomiset insert/remove-metodit
-- Lisätty atomiset ja säieturvalliset kirjoitusoperaatiot
-- Tehostettu hakuja Map-pohjaisella bookingId-indeksillä (O(1))
-- Estetty turha huoneiden luonti lukuoperaatioissa
-- Lisätty valinnaiset kapasiteettirajat muistinkäytön hallintaan

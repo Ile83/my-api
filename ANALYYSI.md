@@ -125,4 +125,53 @@ Lisäsin kapasiteettirajoja (huoneet, varaukset), jotta ratkaisu on turvallisemp
 
 Näiden muutosten ansiosta ratkaisu on selvästi luotettavampi, helpommin ylläpidettävä ja paremmin perusteltavissa myös tuotantitason suunnittelun näkökulmasta, vaikka itse toteutus onkin edelleen in-memory-ratkaisu.
 
+## app.ts
+
+## 1. Mitä tekoäly teki hyvin?
+
+Tekoäly tuotti rakenteeltaan selkeää ja luettavaa TypeScript/Express-koodia, joka noudatti yleisiä REST-API-käytäntöjä. Se osasi hyödyntää hyvin keskeisiä kirjastoja, kuten express, uuid ja zod, sekä soveltaa niitä tarkoituksenmukaisesti varausrajapinnan toteutuksessa.
+
+Erityisen hyvin tekoäly huomioi:
+
+Perusvalidoinnin (esim. roomId, bookingId, request body)
+
+Selkeä ja oikeaoppinen HTTP-statuskoodi (404)
+
+Aikavälien päällekkäisyyden tarkistamisen liiketoimintalogiikassa
+
+Koodin ja kommenttien selkeyden, mikä helpotti jatkokehitystä ja arviointia
+
+Lisäksi tekoäly toi esiin tuotantokäyttöön liittyviä näkökulmia (virheenkäsittely, tietoturva, kilpajuoksutilanteet), jotka auttoivat ymmärtämään, mihin asioihin oikeissa järjestelmissä tulee kiinnittää huomiota.
+
+## 2. Mitä tekoäly teki huonosti?
+
+Tekoälyn tuottama koodi ei ollut sellaisenaan täysin tuotantokelpoinen, vaikka se ensi silmäyksellä vaikutti toimivalta. Keskeisiä puutteita olivat:
+
+Async-virheenkäsittely: async-reitit eivät olleet suojattuja Express 4:n näkökulmasta, mikä olisi voinut johtaa virheiden katoamiseen tai pyyntöjen jäämiseen roikkumaan.
+
+Poikkeustilanteet liiketoimintalogiikassa: toInterval() saattoi edelleen heittää poikkeuksen tietyissä reunatapauksissa (esim. virheellinen olemassa oleva data), eikä tätä ollut aluksi huomioitu kaikissa kohdissa.
+
+Liiallinen luottamus oletuksiin: Tekoäly oletti, että kaikki tallennettu data on aina validia, mikä ei ole turvallinen oletus edes muistipohjaisessa ratkaisussa.
+
+## 3. Mitkä olivat tärkeimmät parannukset, jotka teit tekoälyn tuottamaan koodiin ja miksi?
+
+Tein seuraavat keskeiset parannukset:
+
+Lisäsin async-handlerin reiteille
+Tämä varmistaa, että kaikki async-reitit välittävät virheet oikein Expressin virheenkäsittelijälle. Ilman tätä sovellus voisi käyttäytyä epädeterministisesti virhetilanteissa.
+
+Tein overlap-tarkistuksesta ei-heitettävän
+Kapseloin toInterval()-kutsun try/catch-lohkoon myös olemassa olevien varausten osalta. Tämä estää koko pyynnön kaatumisen, jos muistissa oleva data on jostain syystä virheellistä, ja suojaa järjestelmää kaksoisvarauksilta.
+
+Paransin pagination-parametrien validointia
+Lisäsin tarkistukset kokonaisluvuille ja selkeät rajat (limit, offset), jotta API ei käyttäydy epäloogisesti tai kuormitu vahingossa.
+
+Lisäsin Location-headerin POST-vastaukseen
+Tämä parantaa REST-rajapinnan semanttista oikeellisuutta ja vastaa paremmin HTTP-standardien suosituksia.
+
+Selkeytin virheilmoituksia ja reunatapausten käsittelyä
+Tavoitteena oli tehdä API:n käytöksestä ennustettavaa sekä asiakkaalle että arvioijalle ja varmistaa, että virheet palautuvat hallitusti oikeilla statuskoodeilla.
+
+Näiden muutosten ansiosta koodi on robustimpi, helpommin arvioitava ja lähempänä todellisen tuotantojärjestelmän vaatimuksia, kuitenkaan ylittämättä kurssitehtävän laajuutta.
+
 
