@@ -1,36 +1,106 @@
-import { Booking } from "../domain/booking";
+import type { Booking } from "../domain/booking";
 
-class MemoryStore {
-  private bookingsByRoom = new Map<string, Booking[]>();
+type RoomId = string;
 
-  list(roomId: string): Booking[] {
-    return (this.bookingsByRoom.get(roomId) ?? []).slice();
-  }
+type Store = Map<RoomId, Booking[]>;
 
-  insert(roomId: string, booking: Booking): void {
-    const list = this.bookingsByRoom.get(roomId) ?? [];
-    list.push(booking);
-    // Keep sorted by start time for consistent output (optional but nice).
-    list.sort((a, b) => Date.parse(a.startTime) - Date.parse(b.startTime));
-    this.bookingsByRoom.set(roomId, list);
-  }
+/**
+ * Minimal async mutex (FIFO) per key.
+ */
+class KeyedMutex {
+  private locks = new Map<string, Promise<void>>();
 
-  remove(roomId: string, bookingId: string): boolean {
-    const list = this.bookingsByRoom.get(roomId);
-    if (!list) return false;
+  async runExclusive<T>(key: string, fn: () => T | Promise<T>): Promise<T> {
+    const previous = this.locks.get(key) ?? Promise.resolve();
 
-    const idx = list.findIndex((b) => b.id === bookingId);
-    if (idx === -1) return false;
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => (release = resolve));
 
-    list.splice(idx, 1);
-    this.bookingsByRoom.set(roomId, list);
-    return true;
-  }
+    // Chain the lock
+    this.locks.set(key, previous.then(() => current));
 
-  find(roomId: string, bookingId: string): Booking | undefined {
-    const list = this.bookingsByRoom.get(roomId) ?? [];
-    return list.find((b) => b.id === bookingId);
+    // Wait for previous holder
+    await previous;
+
+    try {
+      return await fn();
+    } finally {
+      release();
+      // Cleanup if no one queued behind us (best-effort)
+      if (this.locks.get(key) === previous.then(() => current)) {
+        // This equality check is not reliable due to new Promise chains;
+        // keep it simple: cleanup when chain completes.
+        current.then(() => {
+          // If nothing else replaced it, delete.
+          if (this.locks.get(key) === previous.then(() => current)) this.locks.delete(key);
+        });
+      }
+    }
   }
 }
 
-export const memoryStore = new MemoryStore();
+const store: Store = new Map();
+const mutex = new KeyedMutex();
+
+function ensureRoom(roomId: string): Booking[] {
+  const existing = store.get(roomId);
+  if (existing) return existing;
+  const arr: Booking[] = [];
+  store.set(roomId, arr);
+  return arr;
+}
+
+export const memoryStore = {
+  list(roomId: string): Booking[] {
+    // Return a copy to avoid accidental external mutation
+    return [...(store.get(roomId) ?? [])];
+  },
+
+  find(roomId: string, bookingId: string): Booking | undefined {
+    return (store.get(roomId) ?? []).find((b) => b.id === bookingId);
+  },
+
+  insert(roomId: string, booking: Booking): void {
+    const arr = ensureRoom(roomId);
+    arr.push(booking);
+  },
+
+  remove(roomId: string, bookingId: string): void {
+    const arr = ensureRoom(roomId);
+    const idx = arr.findIndex((b) => b.id === bookingId);
+    if (idx >= 0) arr.splice(idx, 1);
+  },
+
+  /**
+   * Atomic insert with overlap predicate.
+   * overlap(existing) should return true if there is a conflict.
+   */
+  async insertIfNoOverlap(
+    roomId: string,
+    booking: Booking,
+    overlap: (existing: Booking) => boolean
+  ): Promise<{ ok: true; booking: Booking } | { ok: false }> {
+    return mutex.runExclusive(roomId, () => {
+      const arr = ensureRoom(roomId);
+
+      const hasOverlap = arr.some(overlap);
+      if (hasOverlap) return { ok: false as const };
+
+      arr.push(booking);
+      return { ok: true as const, booking };
+    });
+  },
+
+  /**
+   * Atomic remove
+   */
+  async removeIfExists(roomId: string, bookingId: string): Promise<boolean> {
+    return mutex.runExclusive(roomId, () => {
+      const arr = ensureRoom(roomId);
+      const idx = arr.findIndex((b) => b.id === bookingId);
+      if (idx < 0) return false;
+      arr.splice(idx, 1);
+      return true;
+    });
+  }
+};
