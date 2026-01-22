@@ -1141,4 +1141,236 @@ If you paste your current memoryStore.ts and domain/booking.ts (especially toInt
 
 <!-- bookings.ts tiedoston lisätiedot analyysi.md tiedostosta --!>
 
+<!-- Github Copilot Explain komento schemas.ts --!>
+
+This code defines a Zod validation schema for creating bookings, implementing both structural and business logic validation in a layered approach.
+
+The schema starts with basic structural validation: it requires an object with startTime and endTime fields, both of which must be strings matching the ISO 8601 datetime format. Zod's .datetime() validator handles the basic format checking, ensuring strings look like 2024-01-15T10:30:00Z rather than arbitrary text.
+
+The .superRefine() method adds custom business rules that go beyond simple format validation. This is where the schema enforces logical constraints that require comparing field values or checking against external state. The refinement function receives the validated object (val) and a context object (ctx) that you use to register validation errors.
+
+The first two checks handle an edge case: even though .datetime() validates the format, Date.parse() can still return NaN for certain malformed strings that pass the regex pattern. By checking Number.isFinite(), you catch these edge cases and provide clearer error messages. The early return statements are important—they prevent the code from attempting time comparisons with NaN values, which would always fail silently (since NaN >= NaN is always false).
+
+The temporal ordering check (startMs >= endMs) enforces that bookings must have a positive duration. Note the use of >= rather than >, which means zero-duration bookings (start equals end) are also rejected. This aligns with the half-open interval model [start, end) used in the overlap detection—if start equals end, the interval is empty and meaningless.
+
+The final validation prevents backdated bookings by comparing against Date.now(). This is an interesting design decision: it makes the schema stateful because validation results depend on when you run it. A booking request that's valid at 9:59 AM becomes invalid at 10:00 AM if it tries to book a slot starting at 10:00 AM. This could cause race conditions in concurrent systems, but it's a reasonable business rule for preventing accidental past bookings.
+
+Good news about error handling: This schema actually addresses the concern I mentioned earlier about toInterval() throwing errors. Since Zod validates the datetime format, checks for NaN, and ensures proper time ordering before the data ever reaches toInterval(), those BookingTimeError exceptions should never actually occur in practice (assuming you use this schema consistently). The toInterval() function serves as a defensive secondary layer, but the primary validation happens here.
+
+The CreateBookingInput type uses Zod's infer utility to automatically generate a TypeScript type from the schema. This means you don't have to manually maintain a separate type definition—if you change the schema, the type updates automatically. This is one of Zod's killer features for TypeScript projects.
+
+Potential gotcha: The Date.parse() calls are duplicated between this schema and the toInterval() function in your domain layer. Every booking gets its timestamps parsed at least twice—once during validation, then again during interval creation. If performance becomes critical, consider having the schema transformation step return the parsed milliseconds alongside the original ISO strings, or create a ValidatedBookingInput type that includes the parsed values.
+
+<!-- is this production level code? 
+
+Claude sonnet 4.5 LLM vastaus: --!>
+
+No, this code has several issues that prevent it from being production-ready:
+
+Functional Issues:
+
+Redundant validation - The Number.isFinite() checks on lines 12-18 are unnecessary. Zod's .datetime() validator already ensures the strings are valid ISO 8601 datetimes. If a string passes .datetime(), Date.parse() will always return a finite number. These checks will never actually catch anything, making the error messages misleading.
+
+Clock skew in distributed systems - The Date.now() check (line 29) creates problems in multi-server deployments. If your servers' clocks are even slightly out of sync, the same request could be valid on one server but rejected on another. This leads to unpredictable behavior and confused users.
+
+No maximum booking horizon - Nothing prevents users from booking rooms decades in the future (e.g., year 2100). Production systems typically limit how far ahead you can book (e.g., 1 year maximum).
+
+No duration constraints - Users can book for 1 millisecond or 1000 years. Real systems enforce minimum/maximum booking durations based on business rules (e.g., minimum 15 minutes, maximum 8 hours).
+
+Time precision issues - The "no past bookings" check uses < which means a booking starting right now (startMs === now) would be rejected. This could frustrate users who are trying to book something immediately.
+
+Performance/Design Issues:
+
+Duplicate parsing overhead - You parse the same timestamps here with Date.parse(), then again in toInterval(), and potentially again in memoryStore.insert() for sorting. Each booking gets its dates parsed 3+ times.
+
+Stateful validation - The schema's behavior depends on when you run it (due to Date.now()), making it difficult to test deterministically and creating potential race conditions.
+
+Production improvements needed: Remove the redundant isFinite checks, add max booking horizon validation (e.g., < now + 365 days), add duration limits, consider using <= for the past check to allow immediate bookings, and document the clock sync requirements. Consider transforming the parsed milliseconds in the schema to avoid re-parsing in domain logic.
+
+<!--Prompti Please respond in English schemas.ts koodi ChatGPT:lle ja tuo Claude sonnetin Explain komennon vastaus:
+
+Please respond in English import { z } from "zod"; export const createBookingSchema = z .object({ startTime: z.string().datetime(), endTime: z.string().datetime() }) .superRefine((val, ctx) => { const startMs = Date.parse(val.startTime); const endMs = Date.parse(val.endTime); if (!Number.isFinite(startMs)) { ctx.addIssue({ code: z.ZodIssueCode.custom, message: "startTime is not a valid datetime", path: ["startTime"] }); return; } if (!Number.isFinite(endMs)) { ctx.addIssue({ code: z.ZodIssueCode.custom, message: "endTime is not a valid datetime", path: ["endTime"] }); return; } if (startMs >= endMs) { ctx.addIssue({ code: z.ZodIssueCode.custom, message: "startTime must be before endTime", path: ["startTime"] }); } const now = Date.now(); if (startMs < now) { ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Bookings in the past are not allowed", path: ["startTime"] }); } }); export type CreateBookingInput = z.infer<typeof createBookingSchema>; No, this code has several issues that prevent it from being production-ready: Functional Issues: Redundant validation - The Number.isFinite() checks on lines 12-18 are unnecessary. Zod's .datetime() validator already ensures the strings are valid ISO 8601 datetimes. If a string passes .datetime(), Date.parse() will always return a finite number. These checks will never actually catch anything, making the error messages misleading. Clock skew in distributed systems - The Date.now() check (line 29) creates problems in multi-server deployments. If your servers' clocks are even slightly out of sync, the same request could be valid on one server but rejected on another. This leads to unpredictable behavior and confused users. No maximum booking horizon - Nothing prevents users from booking rooms decades in the future (e.g., year 2100). Production systems typically limit how far ahead you can book (e.g., 1 year maximum). No duration constraints - Users can book for 1 millisecond or 1000 years. Real systems enforce minimum/maximum booking durations based on business rules (e.g., minimum 15 minutes, maximum 8 hours). Time precision issues - The "no past bookings" check uses < which means a booking starting right now (startMs === now) would be rejected. This could frustrate users who are trying to book something immediately. Performance/Design Issues: Duplicate parsing overhead - You parse the same timestamps here with Date.parse(), then again in toInterval(), and potentially again in memoryStore.insert() for sorting. Each booking gets its dates parsed 3+ times. Stateful validation - The schema's behavior depends on when you run it (due to Date.now()), making it difficult to test deterministically and creating potential race conditions. Production improvements needed: Remove the redundant isFinite checks, add max booking horizon validation (e.g., < now + 365 days), add duration limits, consider using <= for the past check to allow immediate bookings, and document the clock sync requirements. Consider transforming the parsed milliseconds in the schema to avoid re-parsing in domain logic.
+
+<!-- ChatGpt:n vastaus: --!>
+
+Your schema is a solid start, but the critique you pasted is only partly accurate. Below is a precise assessment, followed by a production-oriented rewrite that addresses the real concerns (while avoiding “stateful” validation and repeated parsing).
+
+What’s actually right (and what’s overstated)
+1) “Redundant validation” (partly overstated)
+
+z.string().datetime() validates the string format, not “this will definitely parse to a finite epoch ms in every runtime.” In practice, ISO 8601 strings that pass Zod will nearly always parse, but relying on Date.parse() always succeeding is still an assumption.
+
+So, your Number.isFinite(Date.parse(...)) checks are not harmful; they’re just typically unnecessary if you strictly enforce an unambiguous ISO format (e.g., UTC Z or an explicit offset).
+
+2) “Clock skew in distributed systems” (real concern, but solvable)
+
+Any “no past bookings” rule depends on some clock. In multi-node deployments, you mitigate this with:
+
+NTP-synced servers (normal ops hygiene), and/or
+
+a small grace window (e.g., allow a few seconds of skew), and/or
+
+validating against a central time source (often overkill for this assignment).
+
+The actionable improvement is to inject now (or a nowMs() function) so tests are deterministic and you can apply a grace window.
+
+3) “No maximum booking horizon / no duration constraints” (valid business-rule gaps)
+
+Those constraints are business-dependent, but in production you usually define:
+
+maximum horizon (e.g., 365 days)
+
+minimum duration (e.g., 15 minutes)
+
+maximum duration (e.g., 8 hours)
+
+4) “Time precision issue” (mostly preference)
+
+If you reject startMs < now, a user booking “immediately” can fail due to milliseconds of delay. This is best handled via a grace window, not by changing < to <= (either can still race).
+
+5) “Duplicate parsing overhead” (valid design improvement)
+
+The clean fix is to transform into parsed milliseconds once at validation time, and pass those through the rest of the system.
+
+A production-oriented approach (deterministic, single-parse, rule-based)
+
+Key improvements:
+
+Enforce unambiguous datetimes (offset: true or UTC-only).
+
+Parse once and transform into { startMs, endMs }.
+
+Inject nowMs() so validation is deterministic in tests.
+
+Add horizon + duration constraints.
+
+Add a small grace window for “now”.
+
+import { z } from "zod";
+
+export type CreateBookingParsed = {
+  startTime: string;
+  endTime: string;
+  startMs: number;
+  endMs: number;
+};
+
+type BookingRules = {
+  maxHorizonMs: number;     // e.g., 365 days
+  minDurationMs: number;    // e.g., 15 minutes
+  maxDurationMs: number;    // e.g., 8 hours
+  clockSkewGraceMs: number; // e.g., 5 seconds
+};
+
+const defaultRules: BookingRules = {
+  maxHorizonMs: 365 * 24 * 60 * 60 * 1000,
+  minDurationMs: 15 * 60 * 1000,
+  maxDurationMs: 8 * 60 * 60 * 1000,
+  clockSkewGraceMs: 5 * 1000,
+};
+
+// Factory so you can inject time in tests and avoid stateful schemas
+export function makeCreateBookingSchema(
+  nowMs: () => number = () => Date.now(),
+  rules: BookingRules = defaultRules
+) {
+  return z
+    .object({
+      // Require timezone offset to avoid ambiguous local-time strings
+      startTime: z.string().datetime({ offset: true }),
+      endTime: z.string().datetime({ offset: true }),
+    })
+    .transform((val): CreateBookingParsed => {
+      const startMs = Date.parse(val.startTime);
+      const endMs = Date.parse(val.endTime);
+      return { ...val, startMs, endMs };
+    })
+    .superRefine((val, ctx) => {
+      // If you trust datetime({ offset: true }) you can omit these, but keeping them is safe.
+      if (!Number.isFinite(val.startMs)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "startTime is not a valid datetime",
+          path: ["startTime"],
+        });
+        return;
+      }
+      if (!Number.isFinite(val.endMs)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "endTime is not a valid datetime",
+          path: ["endTime"],
+        });
+        return;
+      }
+
+      if (val.startMs >= val.endMs) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "startTime must be before endTime",
+          path: ["startTime"],
+        });
+        return;
+      }
+
+      const duration = val.endMs - val.startMs;
+      if (duration < rules.minDurationMs) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Booking duration must be at least ${Math.round(rules.minDurationMs / 60000)} minutes`,
+          path: ["endTime"],
+        });
+      }
+      if (duration > rules.maxDurationMs) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Booking duration must be at most ${Math.round(rules.maxDurationMs / 3600000)} hours`,
+          path: ["endTime"],
+        });
+      }
+
+      const now = nowMs();
+
+      // Grace window prevents “I booked for now” failures and minor clock skew issues
+      if (val.startMs < now - rules.clockSkewGraceMs) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Bookings in the past are not allowed",
+          path: ["startTime"],
+        });
+      }
+
+      if (val.startMs > now + rules.maxHorizonMs) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Bookings cannot be made more than ${Math.round(rules.maxHorizonMs / 86400000)} days in advance`,
+          path: ["startTime"],
+        });
+      }
+    });
+}
+
+// Typical exports for app usage
+export const createBookingSchema = makeCreateBookingSchema();
+export type CreateBookingInput = z.input<typeof createBookingSchema>;   // { startTime, endTime }
+export type CreateBookingOutput = z.output<typeof createBookingSchema>; // includes startMs/endMs
+
+How this helps your API design
+
+Your route handler can now do:
+
+const parsed = createBookingSchema.parse(req.body);
+
+and reuse parsed.startMs/endMs for overlap checks and storage without re-parsing.
+
+Tests become straightforward:
+
+makeCreateBookingSchema(() => fixedNow).parse(...)
+
+If you want to go even stricter
+
+If you want to eliminate timezone ambiguity entirely, enforce UTC Z explicitly (string ends with Z) and reject offsets. That’s a product decision; the schema above already removes the worst ambiguity by requiring an offset.
+
+If you paste your current toInterval() and overlap logic, I can show the minimal changes to make it consume CreateBookingOutput cleanly (no repeated parsing, no duplicated validation).
+
 
